@@ -159,3 +159,44 @@ CX-7 の正体は、2 台の Spark を直結する **200GbE の専用線（Conne
 2. **分散ランタイム**（Ray クラスタ / mpirun / NCCL の設定）が、その CX-7 の上で 2 台をまとめて 1 つの計算資源として扱う
 
 つまり階層で見ると、**CX-7 のIP設定＝ネットワーク層の必要条件**で、その上に SSH の信頼関係と分散フレームワークが乗って初めて「クラスタ」になります。「CX-7 の設定箇所＝クラスタ設定の"すべて"」ではなく、"土台部分"だと捉えておくと正確です。
+
+---
+
+はい、netplan でも管理NICに固定IPは振れます。前回 nmcli を勧めたのは「一番摩擦が少ない道」だからで、netplan が使えないという意味ではありません。ここは誤解しやすいので、下の層で何が起きているかを整理すると腑に落ちると思います。
+
+**核心はレンダラーです。** デスクトップ構成の DGX OS では、netplan の renderer が既定で **NetworkManager** になっています(Ubuntu Desktop の標準挙動で、GNOME 設定に Realtek Ethernet が出ること・NM がIFを掴んでいることからも確認できます)。つまりこの箱では、
+
+- CX-7 の `40-cx7.yaml` を `netplan apply` しても、**裏では NetworkManager の接続として実体化**されています（renderer 上書きをしていない限り）。
+- 管理NICも、セットアップ時点で NM が生きたプロファイル（自動DHCP）として掴んでいた。
+
+要するに **最下層はどちらも NetworkManager** で、違うのは「どの入口で設定を書くか」だけなんです。CX-7 は NVIDIA の playbook が netplan YAML で書く流儀、管理NICは既に NM プロファイルが掴んでいたので nmcli が自然、という理由でツールを分けていただけです。
+
+なので、あなたの選択肢は実質 2 つあります：
+
+**A. 混在（管理=nmcli/NM、CX-7=netplan）** — デフォルト＆NVIDIA playbook 準拠。すでに nmcli で管理IPを固定済みなら、これで完成しています。
+
+**B. netplan に一本化** — 管理NICも `/etc/netplan/` に宣言的に書き、ネットワーク設定を一箇所に集約。IaC 的に version 管理でき、air-gapped の構築手順書としても再現性が高い。あなたの用途だとむしろこちらの方が筋がいい場面もあります。
+
+Bにする場合、管理NIC用の netplan はこう書きます（renderer を明示、`gateway4` は非推奨なので `routes` で書くのが現行の作法）：
+
+```yaml
+network:
+  version: 2
+  renderer: NetworkManager
+  ethernets:
+    enpXsXfX:            # ip -br link で Realtek 管理IF名を確認
+      addresses: [192.168.1.50/24]
+      routes:
+        - to: default
+          via: 192.168.1.1
+      nameservers:
+        addresses: [192.168.1.1]
+      dhcp4: no
+```
+
+ただし注意点が 2 つあります。
+
+- **二重管理を避ける。** すでに nmcli で管理IPを静的化しているなら、その NM プロファイルと netplan が同じIFを取り合います。netplan に寄せるなら、既存の NM プロファイル（`nmcli connection show` で確認）を削除して **netplan を唯一の所有者**にしてください。1 つのIFは片方のツールに owner を寄せるのが鉄則です。
+- **遠隔なので慎重に。** 管理NICはあなたの SSH ライフラインそのものなので、切り替えは `sudo netplan try`（既定 120 秒で自動ロールバック）＋ロールバック前提で。しかも「今動いているものを敢えて作り替える」操作なので、**単一ソース化のメリットが欲しいときだけやる**、という位置づけで十分です。動いているなら A のままでも本番要件は満たせます。
+
+まとめると、「管理NW＝netplan では設定しない」ではなく、「この箱では管理NICが最初から NM 管理下にあったので nmcli が楽だっただけ。netplan に統一したいなら owner を付け替えれば可能」というのが正確なところです。
