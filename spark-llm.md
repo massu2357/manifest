@@ -141,3 +141,5 @@ ollama pull nemotron-3-nano:30b-a3b-q8_0        # 34GB
 ollama pull ornith:35b-q8_0                     # 37GB
 ollama pull qwen3:30b-a3b-instruct-2507-q8_0    # 32GB
 ```
+
+https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/ollama
