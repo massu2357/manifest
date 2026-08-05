@@ -134,3 +134,10 @@ free -h
 
 - **前回の構成案への当てはめ**
   gpt-oss-120b（約60GB）や Qwen3-Coder-Next（Q6で60GB前後）は **1台に1本なら余裕**、**2本同時常駐は KVキャッシュ込みで厳しい**、という線引きになります。1台1役の分担が現実的、という判断はこの数字から来ています。
+
+```bash
+ollama pull qwen3.6:35b-a3b-q8_0                # 39GB
+ollama pull nemotron-3-nano:30b-a3b-q8_0        # 34GB
+ollama pull ornith:35b-q8_0                     # 37GB
+ollama pull qwen3:30b-a3b-instruct-2507-q8_0    # 32GB
+```
