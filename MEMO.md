@@ -153,6 +153,97 @@ data stream への書き込みは上書きが効かないため、この場合�
 
 **次に同じ事象が起きたときに即断できるよう、`batchId` を必ずログに含めておくことを強くおすすめします。** 同じ `batchId` が2回出ていれば、再処理による重複と確定できます。
 
+# ご質問への回答：過去のログから checkpoint の進行状況がわかるか
+
+**わかる可能性は高いです。** 🎯 ただし「アプリのログレベルが INFO のままだったか」が条件になります。
+
+ここが重要なのですが、**batchId を出すコードを自分で書いていなくても、Spark 本体がデフォルトで出力しています。** HDFS の実ファイルは消えていても、Spark のログは外部 Elasticsearch に残っているはずなので、**当時の状況を今から追える可能性があります。**
+
+---
+
+## 🔍 探すべきログメッセージ
+
+Spark の Structured Streaming は、INFO レベルで以下を自動出力します。
+
+| メッセージ | 何がわかるか |
+|---|---|
+| `Streaming query made progress: {...}` | batchId・numInputRows・offset を含む **JSON まるごと** ⭐最重要 |
+| `Committed offsets for batch N` | そのバッチが**コミット完了**した証跡 |
+| `Resuming at batch N` | 再起動時に、どこから再開したか |
+| `Starting new streaming query` | クエリが**新規開始**された（＝checkpoint が無い状態） |
+| `terminated with error` | 異常終了 |
+
+---
+
+## 📊 batchId の見え方と、その意味
+
+当該期間のログを時系列に並べて、batchId の推移を見てください。
+
+| ログの見え方 | 判定 |
+|---|---|
+| batchId が 1 ずつ単調増加 | ✅ checkpoint は正常に進んでいた |
+| **同じ batchId が2回以上出ている** | ⚠️ **バッチの再実行 → 重複の直接証拠** |
+| batchId が途中で **0 に戻っている** | 🔴 checkpoint が作り直された → **全件再読み込み** |
+| batchId が飛んでいる | 別の異常（要調査） |
+
+---
+
+## 🔑 `runId` が再起動回数の決定打になります
+
+`Streaming query made progress` の JSON には `id` と `runId` の2つが入っています。
+
+- **`id`** … クエリの固有ID。checkpoint が同じなら**再起動しても変わりません**
+- **`runId`** … 起動ごとに**毎回新しく振られます**
+
+> 💡 つまり、**当該期間に `runId` が何種類あったかを数えれば、アプリが何回再起動したかが即座にわかります。**
+> 通常期間と比べて runId の数が明らかに多ければ、「落ちて再起動 → バッチ再実行 → 重複」というシナリオが濃厚になります。
+
+---
+
+## 🔎 Kibana での具体的な調べ方
+
+当該期間で絞り込んだうえで、こんな順序が効率的です。
+
+**① まず再起動の有無を見る**
+```
+message: "Starting new streaming query" or message: "Resuming at batch"
+```
+→ ヒットした件数と時刻を確認
+
+**② batchId の重複を見る**
+```
+message: "Committed offsets for batch"
+```
+→ 時系列に並べて、同じ番号が2回出ていないか確認
+
+**③ 1バッチあたりの件数を見る**
+```
+message: "Streaming query made progress"
+```
+→ JSON 内の `numInputRows` が通常どおり 100 前後か。**桁違いに大きい**バッチがあれば、全件再読み込みの跡です
+
+**④ 落ちた形跡を探す**
+```
+log.level: ERROR
+```
+
+---
+
+## ⚠️ 見つからない場合に考えられる原因
+
+正直なところ、確実とは言い切れません。以下のケースでは追えません。
+
+- ログレベルが **WARN 以上**に設定されていた（`Streaming query made progress` は INFO のため出ない）
+- `Streaming query made progress` は**複数行の JSON** なので、Elastic Agent の multiline 設定次第で**バラバラに分割・切り捨てられている**可能性があります
+- ログ側の ILM（保持ポリシー）で当該期間が消えている
+
+---
+
+まずは **①の「Starting new streaming query」/「Resuming at batch」を検索してみる**のが、一番コストが低くて情報量が多いと思います。ここに複数ヒットすれば、それだけで再起動が起きていた証拠になります。
+
+ログのサンプルを1件貼っていただければ、フィールド構成に合わせた具体的な Kibana クエリや、batchId の重複を集計する ES クエリを組み立てられます。
+
+
 ---
 
 現在の Spark / PySpark のバージョンを教えていただければ、①か②のどちらで組むべきか、より具体的にお伝えできます。
