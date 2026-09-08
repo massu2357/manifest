@@ -307,3 +307,113 @@ curl http://localhost:8000/v1/completions \
 ---
 
 上記をそのまま実行できる形の**手順書（Markdown）**としてファイル出力もできます。実機で見ながら進めるなら、そちらの方が使いやすいかもしれません。必要でしたらお申し付けください。
+
+結論から言うと、**壊れません。完全に可逆です** ✅
+
+---
+
+### 🛡️ なぜ安全と言えるか
+
+やることは実質2つだけです。
+
+1. `/etc/netplan/40-cx7.yaml` を**新規作成**する
+2. `sudo netplan apply` で反映する
+
+**既存設定を書き換えるのではなく、ファイルを1枚足すだけ**です。公式にもロールバック手順（ファイル削除 → `netplan apply`）が明記されています。
+
+そして重要な点として、**以下は一切影響を受けません**。
+
+- 📦 HuggingFace のモデルキャッシュ（再ダウンロード不要）
+- 🐳 Docker イメージ・コンテナ定義
+- 🔌 QSFPの物理接続・インターフェース名
+- 🔑 SSH の公開鍵（`authorized_keys` はIPではなくユーザ単位）
+
+変わるのは **IPアドレスの値だけ**です。
+
+---
+
+### ⚠️ 移行前の確認3点
+
+**① サブネットの衝突チェック（これが一番重要）**
+
+公式サンプルは `192.168.100.0/24` と `192.168.101.0/24` を使います。社内LANやDockerブリッジがこの帯域と被っていると、**管理LAN側の通信が壊れます**。
+
+```bash
+ip route
+docker network inspect bridge | grep Subnet
+```
+
+被っていたら `192.168.200.x` など空いている帯域に変えてください。設定値を変えるだけで手順は同じです。
+
+**② 作業は管理LAN経由で**
+
+QSFP経由でSSHしていると、`netplan apply` で自分の接続が切れます。Wi-Fi/有線LAN側、または物理コンソールから実施してください。
+
+**③ 現状を控えておく**
+
+```bash
+ip addr show enp1s0f1np1
+ip addr show enP2p1s0f1np1
+ip link show enp1s0f1np1   # MTU も控えておくと安心
+ls /etc/netplan/           # 既存ファイルの有無を確認
+```
+
+---
+
+### 📋 移行手順
+
+```bash
+# 1. まず推論を止める（両ノード）
+docker compose down        # または docker stop/rm でRayコンテナを削除
+
+# 2. netplan 設定を作成（両ノード、IPだけ変える）
+sudo tee /etc/netplan/40-cx7.yaml > /dev/null <<EOF
+network:
+  version: 2
+  ethernets:
+    enp1s0f1np1:
+      addresses: [192.168.100.10/24]
+      dhcp4: no
+    enP2p1s0f1np1:
+      addresses: [192.168.101.10/24]
+      dhcp4: no
+EOF
+sudo chmod 600 /etc/netplan/40-cx7.yaml
+sudo netplan apply
+
+# 3. 疎通確認
+ip addr show enp1s0f1np1
+ping -c3 192.168.100.11      # 相手ノード
+
+# 4. SSH再確認（ホスト鍵の受け入れが必要）
+ssh 192.168.100.11 hostname
+```
+
+**Rayコンテナを先に止めるのが必須**です。Rayは起動時のIPにバインドし続けるため、IP変更後も生き残っていると中途半端な状態になります。作り直せば済みます。
+
+---
+
+### 🔧 移行後に更新するもの
+
+| 対象 | 内容 |
+|---|---|
+| compose の `.env` | `VLLM_HOST_IP` / `HEAD_ADDR` / `NO_PROXY` |
+| `~/.ssh/known_hosts` | 新IPのホスト鍵を受け入れ（`discover-sparks` 再実行でも可） |
+| `/etc/hosts` | ノード名でIPを引いている場合 |
+
+`NCCL_SOCKET_IFNAME` などのインターフェース名は**変わりません**ので、そのままで大丈夫です。
+
+---
+
+### 🚨 万一おかしくなったら
+
+```bash
+sudo rm /etc/netplan/40-cx7.yaml
+sudo netplan apply
+```
+
+これで元の自動割り振り状態に戻ります。管理LANが生きていれば、リモートからでも復旧できます。
+
+---
+
+いま**動く状態がある**というのは検証上とても価値があるので、移行後は同じ405B（または8B）の疎通テストをもう一度通して、「IP以外は何も変わっていない」ことを確認してから compose 化に進むのが安全な順序です。
