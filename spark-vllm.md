@@ -1148,3 +1148,41 @@ docker compose logs | grep -E "NET/(IB|Socket)"
 ```
 
 ただしデバイス名は環境依存なので、`ls /dev/infiniband` の実際の出力を見てから決めてください。
+
+
+公式手順との差分を全て潰した版を作り直しました。### 📌 主な変更点
+
+**1. `Dockerfile` を新規追加**
+Rayをイメージに焼き込みます。公式の「起動のたびに `pip install`」方式は、オフライン運用と相性が悪いためです。社内CAの取り込みも同時に済ませています。
+
+**2. 分散通信の環境変数を公式と揃えました**
+`MASTER_ADDR` / `UCX_NET_DEVICES` / `OMPI_MCA_btl_tcp_if_include` / `GLOO_SOCKET_IFNAME` / `TP_SOCKET_IFNAME` / `RAY_memory_monitor_refresh_ms` を追加。`.env` では **`MN_IF_NAME` 1つ**を書けば全部に展開されます。
+
+**3. RDMA関連をコメントアウトに変更**
+公式手順にデバイス指定が無い＝**現在の動作確認済み構成はTCP経路**なので、まずそこに揃えました。有効化はREADME第10節に分離しています。
+
+**4. ヘルスチェックを `curl` から `python3` に変更**
+NGCイメージに `curl` がある保証がないためです。プロキシも明示的に無効化しています。
+
+**5. `pull_policy: never` を追加**
+意図しない外部pullを防ぎます。
+
+---
+
+### ⚠️ 私の過失について
+
+`ray: command not found` の原因を、最初「PATHの問題」と誤診しました。実際は公式手順の `sed` パッチを見落としていたためです。`which ray` の出力を貼っていただいたおかげで確定できました。
+
+同様の見落としがないよう、今回は公式ページを再取得して**全ての `-e` 引数を照合**しています。README第0節に差分表を載せたので、以降は公式手順が更新された際の突き合わせにも使えます。
+
+---
+
+### 🚀 次の一手
+
+```bash
+mkdir -p ~/spark-vllm/ca && cd ~/spark-vllm
+# ファイル配置後
+docker build -t vllm-ray:26.05 .
+```
+
+ビルド末尾で `ray, version 2.x.x` が出れば準備完了です。ここで詰まるようなら、プロキシか証明書まわりなので、エラーを貼っていただければ対応します。
