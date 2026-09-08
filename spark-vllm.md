@@ -417,3 +417,217 @@ sudo netplan apply
 ---
 
 いま**動く状態がある**というのは検証上とても価値があるので、移行後は同じ405B（または8B）の疎通テストをもう一度通して、「IP以外は何も変わっていない」ことを確認してから compose 化に進むのが安全な順序です。
+
+**新しいファイルを重ねるのではなく、既存ファイルを書き換えるのが正解です** 🎯
+
+netplan は `/etc/netplan/*.yaml` を**全部読んでマージ**します（ファイル名の昇順で、後勝ち）。放置して `40-cx7.yaml` を足すと、両方の設定が混ざって挙動が読めなくなります。
+
+---
+
+### ⚠️ まず中身を確認してください
+
+**DGX OS が最初から置いているファイルを消してはいけません。** 消すと管理LAN側の通信ごと落ちる可能性があります。
+
+```bash
+ls -la /etc/netplan/
+sudo cat /etc/netplan/*.yaml
+sudo netplan get            # マージ後の「実際に効いている設定」が見られる
+```
+
+判断基準はシンプルです。
+
+| ファイル | 対応 |
+|---|---|
+| `01-network-manager-all.yaml` など、**CX-7以外**も含む標準ファイル | 🚫 触らない |
+| ご自身が作った**CX-7専用**のファイル | ✏️ これを書き換える |
+
+---
+
+### ✏️ 書き換え手順
+
+```bash
+# 1. バックアップ（/etc/netplan の外へ退避）
+sudo cp /etc/netplan/<既存ファイル>.yaml ~/netplan-backup.yaml.bak
+```
+
+> 💡 バックアップを `/etc/netplan/` 内に `.bak` で置くのはNGです。netplan は拡張子 `.yaml` 以外を読みませんが、紛らわしいので外に出すのが安全です。
+
+```bash
+# 2. 既存ファイルを静的IPに書き換え
+sudo tee /etc/netplan/<既存ファイル>.yaml > /dev/null <<EOF
+network:
+  version: 2
+  ethernets:
+    enp1s0f1np1:
+      addresses: [192.168.100.10/24]
+      dhcp4: no
+      link-local: []
+    enP2p1s0f1np1:
+      addresses: [192.168.101.10/24]
+      dhcp4: no
+      link-local: []
+EOF
+
+sudo chmod 600 /etc/netplan/<既存ファイル>.yaml
+```
+
+`link-local: []` を明示しているのがポイントです。これが無いと、**169.254.x.x のアドレスが残ったまま**静的IPが追加され、NCCLがどちらを掴むか不定になります。
+
+---
+
+### 🧪 適用は `netplan try` で
+
+```bash
+sudo netplan try
+```
+
+これは **120秒以内に Enter を押さないと自動的に元へ戻る**モードです。設定ミスでネットワークが切れても勝手に復旧するので、リモート作業では必ずこちらを使ってください。問題なければ Enter → 確定します。
+
+確認できたら通常の適用に切り替えても構いません。
+
+```bash
+sudo netplan apply
+ip addr show enp1s0f1np1     # 169.254.x.x が消えていること
+```
+
+---
+
+### 🔧 もうひとつの注意：renderer を揃える
+
+既存ファイルに `renderer: NetworkManager` の記述があれば、**書き換え後のファイルにも同じ行を残してください**。
+
+netplan のデフォルト renderer は `networkd` なので、指定を消すと「NetworkManager と systemd-networkd が同じインターフェースを取り合う」状態になり、IPが付いたり消えたりします。これは原因が分かりにくい厄介な不具合です。
+
+```yaml
+network:
+  version: 2
+  renderer: NetworkManager      # ← 既存にあったら維持する
+  ethernets:
+    ...
+```
+
+---
+
+### 📌 まとめ
+
+1. `sudo netplan get` で現状把握
+2. **CX-7用の自作ファイルだけ**を書き換え（新規追加しない）
+3. `link-local: []` と `renderer` の扱いに注意
+4. `netplan try` で安全に適用
+
+まずは `ls /etc/netplan/` と `sudo netplan get` の結果を見せていただければ、どのファイルをどう直すか具体的に指定できます。
+
+それなら話はずっと簡単です 👍 **同じファイルなので、公式の手順をそのまま実行すれば上書きされます。**
+
+前回、私は「DGX OS標準のファイルを消さないよう注意」とお伝えしましたが、`40-cx7.yaml` は Massuさんご自身が作られたCX-7専用ファイルなので、その心配は不要でした。
+
+---
+
+### ✅ やること
+
+公式 Step 3 の Option 1 のコマンドを**そのまま**流すだけです。
+
+```bash
+# バックアップだけ先に（/etc/netplan の外へ）
+sudo cp /etc/netplan/40-cx7.yaml ~/40-cx7.yaml.bak
+
+# 中身を確認（renderer 行の有無をチェック）
+sudo cat /etc/netplan/40-cx7.yaml
+```
+
+`sudo tee /etc/netplan/40-cx7.yaml > /dev/null <<EOF ...` は**ファイルを丸ごと置き換える**ので、古い自動割り振りの設定は残りません。前回お伝えした「`link-local: []` を明示」も、上書きなら不要です。
+
+> 💡 netplan の `link-local` のデフォルトは `[ipv6]` です。つまり**IPv4のリンクローカルは書かない限り付きません**。IPv6の `fe80::` が残るのは正常なので、気にしなくて大丈夫です。
+
+---
+
+### ⚠️ 1点だけ引き継ぐもの
+
+古いファイルに `renderer: NetworkManager` の行があった場合は、**新しい内容にも残してください**。公式サンプルには含まれていないため、そのまま貼ると renderer が `networkd` に切り替わり、NetworkManager と競合する可能性があります。
+
+```yaml
+network:
+  version: 2
+  renderer: NetworkManager      # ← 元ファイルにあったら維持
+  ethernets:
+    enp1s0f1np1:
+      addresses: [192.168.100.10/24]
+      dhcp4: no
+    enP2p1s0f1np1:
+      addresses: [192.168.101.10/24]
+      dhcp4: no
+```
+
+インターフェース名も、古いファイルの記載と一致しているか見比べておくと確実です。
+
+---
+
+### 🧪 適用
+
+```bash
+sudo netplan try      # 120秒で自動ロールバック。問題なければ Enter
+ip addr show enp1s0f1np1
+```
+
+`169.254.x.x` が消えて `192.168.100.10` だけになっていれば成功です。
+
+戻したくなったら、バックアップを書き戻して `sudo netplan apply` で元通りになります。
+
+いい選択です 👍 2台の固定構成なら compose が一番バランスが取れます。一式を作りました。### 🔑 設計のポイント
+
+**1. compose ファイルは両ノード共通、`.env` だけ変える**
+差分は実質 `NODE_ROLE` と `VLLM_HOST_IP` の2つです。管理対象が減ります。
+
+**2. `entrypoint.sh` が role で分岐**
+- worker → `ray start --block` のみ
+- head → `ray start --head` → **workerの参加を待つ** → `vllm serve` を `exec`
+
+この「待つ」処理があるおかげで、**起動順を気にしなくてよくなります**。頭からworkerを叩き起こす必要も、`ray status` を手で確認する必要もありません。
+
+**3. `docker exec` が不要になる**
+公式手順の「クラスタを立てる」と「サーバを起動する」の2ステップが、1つの常駐プロセスに統合されます。SSHセッションに紐づく部分がなくなるのが本質的な改善点です。
+
+---
+
+### 🚀 使い方
+
+```bash
+# 両ノードで
+mkdir -p ~/spark-vllm && cd ~/spark-vllm
+# ファイルを配置後
+chmod +x entrypoint.sh
+cp env.head.example .env      # worker側は env.worker.example
+vi .env                       # IP・イメージ名を自環境に合わせる
+
+docker compose up -d
+docker compose logs -f
+```
+
+`Application startup complete.` が出れば完了です。停止は `docker compose down`。
+
+---
+
+### ⚠️ 補足3点
+
+**① QSFPのIPを恒久化してください**
+composeは自動復帰しますが、**IPが消えていると起動ループになります**。`ip addr add` ではなく、NetworkManagerのプロファイルとして登録するのが確実です。
+
+```bash
+sudo nmcli con add type ethernet ifname enP2p1s0f1np1 con-name qsfp \
+  ipv4.method manual ipv4.addresses 192.168.100.1/24 \
+  ipv6.method disabled connection.autoconnect yes
+```
+
+これなら「NetworkManagerに設定を消される」問題自体が起きません。
+
+**② `restart: unless-stopped` は unhealthy では再起動しません**
+Dockerの再起動ポリシーはプロセス終了のみを見ます。ヘルスチェック失敗で復旧させたい場合は、別途 systemd タイマーや autoheal コンテナが必要です。まずは手動確認で十分かと思います。
+
+**③ `MAX_MODEL_LEN=64` は疎通確認専用です**
+405Bの動作確認が済んだら、実用モデルに切り替えて値を戻してください。
+
+---
+
+`/dev/infiniband` の有無だけ先に確認しておくと安心です（`ls /dev/infiniband`）。無ければ compose の `devices:` を外してください。
+
+
