@@ -69,4 +69,55 @@ curl --noproxy '*' http://localhost:8000/v1/chat/completions \
 ```
 
 - RedHatAI/GLM-5.3-Flash-NVFP4
+
+```
+# envs/glm53-flash.env
+VLLM_IMAGE=vllm-ray:26.05
+
+MN_IF_NAME=enp1s0f1np1
+HF_CACHE=/home/nvidia/.cache/huggingface
+RAY_NUM_NODES=2
+
+MODEL=RedHatAI/GLM-5.3-Flash-NVFP4
+TP_SIZE=2
+MAX_MODEL_LEN=65536
+GPU_MEM_UTIL=0.70
+EXTRA_VLLM_ARGS=--kv-cache-dtype fp8 --tool-call-parser glm47 --reasoning-parser glm45 --enable-auto-tool-choice --max-num-seqs 4 --enable-chunked-prefill
+
+NCCL_DEBUG=WARN
+RAY_MEMORY_MONITOR_REFRESH_MS=0
+HF_HUB_OFFLINE=0
+TRANSFORMERS_OFFLINE=0
+VLLM_NO_USAGE_STATS=1
+DO_NOT_TRACK=1
+HTTP_PROXY=
+HTTPS_PROXY=
+NO_PROXY=localhost,127.0.0.1,192.168.100.10,192.168.100.11
+```
+
 - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
+
+```
+# envs/nemotron-super.env
+VLLM_IMAGE=vllm-ray:26.05
+
+MN_IF_NAME=enp1s0f1np1
+HF_CACHE=/home/nvidia/.cache/huggingface
+RAY_NUM_NODES=2
+
+MODEL=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
+TP_SIZE=2
+MAX_MODEL_LEN=131072
+GPU_MEM_UTIL=0.70
+EXTRA_VLLM_ARGS=--trust-remote-code --kv-cache-dtype fp8 --swap-space 0 --enable-chunked-prefill --mamba-ssm-cache-dtype float32 --reasoning-parser nemotron_v3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --max-cudagraph-capture-size 128 --async-scheduling --max-num-seqs 8
+
+NCCL_DEBUG=WARN
+RAY_MEMORY_MONITOR_REFRESH_MS=0
+HF_HUB_OFFLINE=0
+TRANSFORMERS_OFFLINE=0
+VLLM_NO_USAGE_STATS=1
+DO_NOT_TRACK=1
+HTTP_PROXY=
+HTTPS_PROXY=
+NO_PROXY=localhost,127.0.0.1,192.168.100.10,192.168.100.11
+```
