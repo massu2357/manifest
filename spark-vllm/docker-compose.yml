@@ -1,0 +1,102 @@
+# DGX Spark 2ノード vLLM 分散推論 (Ray / TP=2)
+#
+# 起動例（両ノードで同じコマンド）:
+#   docker compose --env-file node.env --env-file current.env up -d
+#
+# node.env    ... ノード固有（1度書いたら不変）
+# current.env ... models/*.env へのシンボリックリンク（後勝ちで上書き）
+
+services:
+  vllm:
+    image: ${VLLM_IMAGE}
+    container_name: vllm-node
+    restart: unless-stopped
+    pull_policy: never
+
+    # run_cluster.sh の --network host / --shm-size 10.24g 相当
+    network_mode: host
+    shm_size: "10.24g"
+
+    # run_cluster.sh の --gpus all 相当
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    volumes:
+      # run_cluster.sh の -v ${PATH_TO_HF_HOME}:/root/.cache/huggingface 相当
+      - ${HF_CACHE}:/root/.cache/huggingface
+      - ./entrypoint.sh:/entrypoint.sh:ro
+
+    environment:
+      # --- ノード固有（node.env） ---
+      - NODE_ROLE=${NODE_ROLE}
+      - VLLM_HOST_IP=${VLLM_HOST_IP}
+      - HEAD_ADDR=${HEAD_ADDR}
+      - RAY_NUM_NODES=${RAY_NUM_NODES:-2}
+
+      # --- 分散通信（公式手順と同一。全て同じ QSFP インターフェース名を指す） ---
+      - MASTER_ADDR=${HEAD_ADDR}
+      - UCX_NET_DEVICES=${MN_IF_NAME}
+      - NCCL_SOCKET_IFNAME=${MN_IF_NAME}
+      - OMPI_MCA_btl_tcp_if_include=${MN_IF_NAME}
+      - GLOO_SOCKET_IFNAME=${MN_IF_NAME}
+      - TP_SOCKET_IFNAME=${MN_IF_NAME}
+      - RAY_memory_monitor_refresh_ms=${RAY_MEMORY_MONITOR_REFRESH_MS:-0}
+      - NCCL_DEBUG=${NCCL_DEBUG:-WARN}
+
+      # --- モデル固有（models/*.env）。head のみ参照 ---
+      - MODEL=${MODEL}
+      - TP_SIZE=${TP_SIZE:-2}
+      - MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096}
+      - GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.70}
+      - EXTRA_VLLM_ARGS=${EXTRA_VLLM_ARGS:-}
+
+      # --- オフライン動作 ---
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-0}
+      - VLLM_NO_USAGE_STATS=${VLLM_NO_USAGE_STATS:-1}
+      - DO_NOT_TRACK=${DO_NOT_TRACK:-1}
+
+      # --- プロキシ ---
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1}
+      - REQUESTS_CA_BUNDLE=${REQUESTS_CA_BUNDLE:-}
+      - SSL_CERT_FILE=${SSL_CERT_FILE:-}
+
+    entrypoint: ["/bin/bash", "/entrypoint.sh"]
+
+    # head は API、worker は Ray の生存を見る
+    # プロキシ環境で自ホストへの疎通が失敗しないよう ProxyHandler({}) で無効化する
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >
+          if [ "$$NODE_ROLE" = "head" ];
+          then python3 -c "import urllib.request as u; u.build_opener(u.ProxyHandler({})).open('http://127.0.0.1:8000/health', timeout=5)";
+          else ray status > /dev/null 2>&1;
+          fi
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # モデルのロードに時間がかかるため長めに取る
+      start_period: 20m
+
+    stop_grace_period: 60s
+
+    # ------------------------------------------------------------------
+    # RDMA (RoCE) を使う場合のみ有効化する。
+    # 公式プレイブックはこれらを指定していない = TCP 経路で動作している。
+    # `ls /dev/infiniband` が空の環境で有効化すると起動に失敗する。
+    # ------------------------------------------------------------------
+    # cap_add:
+    #   - IPC_LOCK
+    # ulimits:
+    #   memlock: -1
+    #   stack: 67108864
+    # devices:
+    #   - /dev/infiniband:/dev/infiniband
